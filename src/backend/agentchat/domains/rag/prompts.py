@@ -1,16 +1,30 @@
+from typing import Any
+
 from agentchat.domains.indexing.entities import SearchHit
 
 
-def build_rag_prompt(question: str, hits: list[SearchHit], mode: str, excel_result: str | None = None) -> str:
+def build_rag_prompt(
+    question: str,
+    hits: list[SearchHit],
+    mode: str,
+    excel_result: str | None = None,
+    structured_intent: dict[str, Any] | None = None,
+) -> str:
+    intent = structured_intent or {}
     evidence = "\n\n".join(
         f"[{index + 1}] {hit.file_name} 页码:{hit.page_no or '-'}\n{hit.content}"
         for index, hit in enumerate(hits)
     )
-    analysis_hint = (
-        "请进行跨文档归纳，最多 3 条要点，说明结论边界和不确定性。"
-        if mode == "deep_analysis"
-        else "请基于证据直接回答，默认 1 句话，最多 2 句话。"
-    )
+    question_type = intent.get("question_type") or "fact"
+    if mode == "deep_analysis":
+        analysis_hint = "请进行跨文档归纳，最多 3 条要点，说明结论边界和不确定性。"
+    elif question_type == "enumeration":
+        analysis_hint = (
+            "用户询问条目、标准或要求清单。请基于证据分条列出，每条一行，"
+            "最多 8 条，保留关键数值和条件，不要大段粘贴原文。"
+        )
+    else:
+        analysis_hint = "请基于证据直接回答，默认 1 句话，最多 2 句话。"
     excel_hint = f"\nExcel 计算结果:\n{excel_result}" if excel_result else ""
     return (
         "你是企业内部知识库助手，只能根据给定证据回答。\n"
@@ -23,6 +37,7 @@ def build_rag_prompt(question: str, hits: list[SearchHit], mode: str, excel_resu
         "如果证据不足，请明确说明缺少哪些信息。\n"
         f"问题：{question}\n"
         f"模式：{mode}\n"
+        f"问题类型：{question_type}\n"
         f"{analysis_hint}\n"
         f"证据片段（仅供判断，不要原样复述）：\n{evidence or '未检索到可用证据'}"
         f"{excel_hint}\n"

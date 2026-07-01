@@ -1,22 +1,38 @@
+from typing import Any
+
 from agentchat.domains.indexing.entities import SearchHit
+from agentchat.domains.rag.evidence_selection import EvidenceSelector
 
 
 class RerankProvider:
     def __init__(self):
         self.last_provider = "fallback_overlap"
         self.last_debug: dict = {}
+        self._intent_selector = EvidenceSelector()
 
-    async def rerank_hits(self, query: str, hits: list[SearchHit], top_k: int) -> list[SearchHit]:
+    async def rerank_hits(
+        self,
+        query: str,
+        hits: list[SearchHit],
+        top_k: int,
+        structured_intent: dict[str, Any] | None = None,
+    ) -> list[SearchHit]:
         if not hits:
             self.last_debug = {"provider": self.last_provider, "input_count": 0, "selected": []}
             return []
 
+        rerank_failure: dict[str, Any] | None = None
+
         try:
             from agentchat.services.rag.rerank import Reranker
 
-            results = await Reranker.rerank_documents(query, [hit.content for hit in hits])
+            results = await Reranker.rerank_documents(
+                query,
+                [hit.content for hit in hits],
+                top_n=len(hits),
+            )
             reranked: list[SearchHit] = []
-            for result in results[:top_k]:
+            for result in results:
                 hit = hits[result.index]
                 hit.score = float(result.score)
                 hit.score_breakdown = {
@@ -24,27 +40,36 @@ class RerankProvider:
                     "rerank": round(float(result.score), 6),
                 }
                 reranked.append(hit)
+            reranked.sort(key=lambda item: item.score, reverse=True)
             if reranked:
                 self.last_provider = "configured_rerank"
                 self.last_debug = {
                     "provider": self.last_provider,
                     "input_count": len(hits),
-                    "selected": [self._debug_hit(hit) for hit in reranked],
+                    "returned_count": len(reranked),
+                    "selected_preview": [self._debug_hit(hit) for hit in reranked[:top_k]],
                 }
                 return reranked
+            rerank_failure = {
+                "provider": "configured_rerank_empty",
+                "input_count": len(hits),
+                "reason": "rerank API 返回空结果",
+            }
         except Exception as err:
-            self.last_debug = {
+            rerank_failure = {
                 "provider": "configured_rerank_failed",
                 "input_count": len(hits),
                 "error": str(err),
             }
 
-        self.last_provider = "fallback_overlap"
-        reranked = sorted(hits, key=lambda item: item.score, reverse=True)[:top_k]
+        self.last_provider = "fallback_intent_rank"
+        reranked = self._intent_selector._rank_by_intent(query, list(hits), structured_intent or {})
         self.last_debug = {
             "provider": self.last_provider,
             "input_count": len(hits),
-            "selected": [self._debug_hit(hit) for hit in reranked],
+            "rerank_failure": rerank_failure,
+            "returned_count": len(reranked),
+            "selected_preview": [self._debug_hit(hit) for hit in reranked[:top_k]],
         }
         return reranked
 

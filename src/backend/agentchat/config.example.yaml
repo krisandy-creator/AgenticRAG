@@ -126,6 +126,8 @@ rag:
     path: ".rag_storage/milvus_lite.db" # Milvus Lite 本地库路径
     collection_name: "global_knowledge_chunks"
     metric_type: "COSINE"
+    lite_short_session: true # Lite 模式每次操作后释放连接，配合文件锁支持 API+Worker 多进程
+    lite_lock_timeout_seconds: 60 # 等待 Milvus Lite 文件锁的超时时间（秒）
 
 # 阿对象存储 OSS 配置
 storage:
@@ -168,4 +170,4 @@ langfuse:
   user_id: "LiangTian" # 用户 ID
 
 # 接口白名单路径
-whitelist_paths: ["/api/v1/login"]
+whitelist_paths: ["/api/v1/auth/login"]

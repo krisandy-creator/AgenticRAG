@@ -35,7 +35,7 @@ async def get_document(document_id: str, login_user=Depends(get_login_user)):
 @router.delete("/{document_id}")
 async def delete_document(document_id: str, login_user=Depends(get_login_user)):
     user = EnterpriseIdentityService.resolve_user(login_user)
-    DocumentService().delete_document(document_id, user.is_admin)
+    await DocumentService().delete_document(document_id, user.is_admin)
     return resp_200()
 
 

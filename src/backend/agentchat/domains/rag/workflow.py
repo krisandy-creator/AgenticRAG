@@ -7,6 +7,7 @@ from agentchat.domains.indexing.services import IndexingService
 from agentchat.domains.observability.event_schema import TraceEvent
 from agentchat.domains.observability.services import TraceService
 from agentchat.domains.rag.excel_tool import ExcelAnalysisTool
+from agentchat.domains.rag.evidence_selection import EvidenceSelector
 from agentchat.domains.rag.prompts import build_rag_prompt
 from agentchat.domains.rag.query_expansion import QueryExpansionService
 from agentchat.domains.rag.repositories import ChatRepository
@@ -21,6 +22,7 @@ class RagWorkflow:
         self.chat_model = ChatModelProvider()
         self.excel_tool = ExcelAnalysisTool()
         self.query_expansion = QueryExpansionService()
+        self.evidence_selector = EvidenceSelector()
 
     async def stream(self, session_id: str, user: EnterpriseUser, question: str, mode: str) -> AsyncIterator[TraceEvent]:
         trace = TraceService.create_trace(session_id=session_id, user_id=user.user_id, question=question, mode=mode)
@@ -54,6 +56,8 @@ class RagWorkflow:
 
             candidate_k = 50 if mode == "deep_analysis" else 40
             rerank_top_k = 8 if mode == "deep_analysis" else 6
+            if expansion.structured_intent.get("question_type") == "enumeration":
+                rerank_top_k = max(rerank_top_k, 8)
             yield event(
                 "retrieval_started",
                 {
@@ -76,14 +80,34 @@ class RagWorkflow:
             yield event("retrieval_finished", {"hit_count": len(hits)})
 
             yield event("rerank_started", {"candidate_count": len(hits)})
-            reranked_hits = await self.reranker.rerank_hits(question, hits, top_k=rerank_top_k)
+            reranked_pool = await self.reranker.rerank_hits(
+                question,
+                hits,
+                top_k=rerank_top_k,
+                structured_intent=expansion.structured_intent,
+            )
             yield event(
                 "rerank_finished",
                 {
-                    "hit_count": len(reranked_hits),
-                    "hits": [self._hit_payload(hit) for hit in reranked_hits],
+                    "hit_count": len(reranked_pool),
+                    "hits": [self._hit_payload(hit) for hit in reranked_pool[:rerank_top_k]],
                     "provider": self.reranker.last_provider,
                     "debug": self.reranker.last_debug,
+                },
+            )
+
+            reranked_hits, evidence_debug = self.evidence_selector.select(
+                question,
+                reranked_pool,
+                expansion.structured_intent,
+                rerank_top_k,
+            )
+            yield event(
+                "evidence_selected",
+                {
+                    "hit_count": len(reranked_hits),
+                    "hits": [self._hit_payload(hit) for hit in reranked_hits],
+                    "debug": evidence_debug,
                 },
             )
 
@@ -95,7 +119,13 @@ class RagWorkflow:
                 excel_result = await self.excel_tool.run(question, document_ids)
                 yield event("excel_analysis_finished", {"has_result": bool(excel_result), "preview": (excel_result or "")[:240]})
 
-            prompt = build_rag_prompt(question, reranked_hits, mode, excel_result)
+            prompt = build_rag_prompt(
+                question,
+                reranked_hits,
+                mode,
+                excel_result,
+                structured_intent=expansion.structured_intent,
+            )
             yield event(
                 "prompt_built",
                 {
