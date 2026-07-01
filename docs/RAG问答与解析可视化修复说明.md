@@ -10,12 +10,12 @@
 
 - `summary.page_count`：解析出的页面数。
 - `summary.chunk_count`：切分出的 chunk 数。
-- `summary.ocr_page_count`：包含 OCR block 的页面数。
+- `summary.vision_page_count`：多模态解析出的页面数。
 - `summary.text_char_count`：解析文本字符数。
 - `summary.parser_counts`：按解析器统计的 chunk 数。
 - `summary.chunk_type_counts`：按 chunk 类型统计的数量。
 - `events`：接收文件、解析文本、切分 chunk、写入索引四个阶段状态。
-- `pages`：页面级 OCR/block 摘要。
+- `pages`：页面级多模态 block 摘要。
 - `chunks`：前 8 个 chunk 的摘要样例。
 
 前端文档管理页通过“解析详情”按钮展示以上信息。

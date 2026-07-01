@@ -15,6 +15,16 @@ class ChunkRepository:
             session.commit()
 
     @staticmethod
+    def append_chunks(document_id: str, chunks: list[DocumentChunkTable]) -> None:
+        if not chunks:
+            return
+        with session_getter() as session:
+            for chunk in chunks:
+                chunk.document_id = document_id
+                session.add(chunk)
+            session.commit()
+
+    @staticmethod
     def list_searchable_chunks(access_level: int, limit: int = 1000) -> list[tuple[DocumentChunkTable, DocumentTable]]:
         with session_getter() as session:
             statement = (

@@ -44,6 +44,18 @@ def _load_yaml_file(file_path: str) -> dict:
 
 def _process_config_data(data: dict) -> dict:
     """处理配置数据，将特定字段转换为 Pydantic 模型"""
+    data = dict(data)
+    rag_section = data.get("rag") or {}
+    if not isinstance(rag_section, dict):
+        rag_section = rag_section.dict() if hasattr(rag_section, "dict") else rag_section.model_dump()
+
+    for nested_key in ("multimodal_parse", "parse_worker"):
+        if nested_key in data:
+            rag_section.setdefault(nested_key, data.pop(nested_key))
+
+    if rag_section:
+        data["rag"] = rag_section
+
     if "multi_models" in data:
         data["multi_models"] = MultiModels(**data["multi_models"])
 
@@ -59,20 +71,17 @@ def _process_config_data(data: dict) -> dict:
     return data
 
 
-async def initialize_app_settings(file_path: str = None):
+def load_app_settings_sync(file_path: str = None) -> None:
+    """同步加载 YAML 配置（Worker 等无 FastAPI lifespan 的进程需在 import database 前调用）。"""
     global app_settings
 
-    # 配置文件路径（按优先级排序）
     local_config_path = "agentchat/config.local.yaml"
     default_config_path = file_path or "agentchat/config.yaml"
 
-    # 优先加载本地配置
     config_data = _load_yaml_file(local_config_path)
-
     if config_data:
         logger.info(f"✅ 使用本地配置文件: {local_config_path}")
     else:
-        # 本地配置不存在，加载默认配置
         config_data = _load_yaml_file(default_config_path)
         if config_data:
             logger.info(f"✅ 使用默认配置文件: {default_config_path}")
@@ -80,9 +89,10 @@ async def initialize_app_settings(file_path: str = None):
             logger.error("❌ 配置文件加载失败，无法启动应用")
             return
 
-    # 处理配置数据（转换为 Pydantic 模型）
     final_config = _process_config_data(config_data)
-
-    # 应用配置到全局设置
     for key, value in final_config.items():
         setattr(app_settings, key, value)
+
+
+async def initialize_app_settings(file_path: str = None):
+    load_app_settings_sync(file_path)

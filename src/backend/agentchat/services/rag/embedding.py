@@ -9,37 +9,47 @@ embedding_client = AsyncOpenAI(base_url=app_settings.multi_models.embedding.base
                                api_key=app_settings.multi_models.embedding.api_key)
 
 async def get_embedding(query: Union[str, List[str]]):
-    # 如果是字符串或长度小于等于10的列表，直接处理
-    if isinstance(query, str) or (isinstance(query, list) and len(query) <= 10):
+    return await get_embedding_batched(query)
+
+
+async def get_embedding_batched(
+    query: Union[str, List[str]],
+    *,
+    api_batch_size: int = 10,
+    max_concurrency: int = 5,
+):
+    if isinstance(query, str):
         responses = await embedding_client.embeddings.create(
             model=embedding_model,
             input=query,
-            encoding_format="float")
+            encoding_format="float",
+        )
+        return responses.data[0].embedding
 
-        if isinstance(query, str):
-            return responses.data[0].embedding
-        else:
-            return [response.embedding for response in responses.data]
+    if not query:
+        return []
 
-    # 处理超过10条的情况
-    semaphore = asyncio.Semaphore(5)  # 限制并发数为5
+    if len(query) <= api_batch_size:
+        responses = await embedding_client.embeddings.create(
+            model=embedding_model,
+            input=query,
+            encoding_format="float",
+        )
+        return [response.embedding for response in responses.data]
+
+    semaphore = asyncio.Semaphore(max_concurrency)
 
     async def process_batch(batch):
         async with semaphore:
             responses = await embedding_client.embeddings.create(
                 model=embedding_model,
                 input=batch,
-                encoding_format="float")
+                encoding_format="float",
+            )
             return [response.embedding for response in responses.data]
 
-    # 将查询分成每组10条
-    batches = [query[i:i + 10] for i in range(0, len(query), 10)]
-
-    # 并发处理所有批次
-    tasks = [process_batch(batch) for batch in batches]
-    results = await asyncio.gather(*tasks)
-
-    # 将所有结果合并
+    batches = [query[i: i + api_batch_size] for i in range(0, len(query), api_batch_size)]
+    results = await asyncio.gather(*[process_batch(batch) for batch in batches])
     return [embedding for batch_result in results for embedding in batch_result]
 
 

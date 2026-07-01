@@ -26,33 +26,62 @@ class IndexingService:
         self.last_debug: dict = {}
 
     async def index_chunks(self, document, chunks: list[TextChunk]) -> list[DocumentChunkTable]:
+        return await self.index_chunks_batch(document, chunks, start_index=0, replace=True)
+
+    async def index_chunks_batch(
+        self,
+        document,
+        chunks: list[TextChunk],
+        *,
+        start_index: int = 0,
+        replace: bool = False,
+        embedding_batch_size: int = 32,
+        embedding_max_concurrency: int = 5,
+        embedding_api_batch_size: int = 10,
+    ) -> list[DocumentChunkTable]:
         if not chunks:
-            ChunkRepository.replace_chunks(document.document_id, [])
+            if replace and start_index == 0:
+                ChunkRepository.replace_chunks(document.document_id, [])
             return []
 
-        embeddings = await self.embedding_provider.embed_texts([chunk.content for chunk in chunks])
         db_chunks: list[DocumentChunkTable] = []
-        for index, chunk in enumerate(chunks):
-            metadata = {
-                **chunk.metadata,
-                "file_name": document.file_name,
-                "file_type": document.file_type,
-                "embedding_dim": len(embeddings[index]) if embeddings else 0,
-            }
-            db_chunks.append(
-                DocumentChunkTable(
-                    document_id=document.document_id,
-                    page_no=chunk.page_no,
-                    chunk_type=chunk.chunk_type,
-                    content=chunk.content,
-                    vector_id=f"{document.document_id}_{index}",
-                    permission_level=document.permission_level,
-                    metadata_json=json.dumps(metadata, ensure_ascii=False),
-                )
-            )
+        all_embeddings: list[list[float]] = []
 
-        ChunkRepository.replace_chunks(document.document_id, db_chunks)
-        await self.vector_store.upsert_chunks(db_chunks, embeddings)
+        for batch_start in range(0, len(chunks), embedding_batch_size):
+            batch = chunks[batch_start: batch_start + embedding_batch_size]
+            embeddings = await self.embedding_provider.embed_texts_batched(
+                [chunk.content for chunk in batch],
+                api_batch_size=embedding_api_batch_size,
+                max_concurrency=embedding_max_concurrency,
+            )
+            all_embeddings.extend(embeddings)
+            for offset, chunk in enumerate(batch):
+                global_index = start_index + batch_start + offset
+                embedding = embeddings[offset] if offset < len(embeddings) else []
+                metadata = {
+                    **chunk.metadata,
+                    "file_name": document.file_name,
+                    "file_type": document.file_type,
+                    "embedding_dim": len(embedding),
+                }
+                db_chunks.append(
+                    DocumentChunkTable(
+                        document_id=document.document_id,
+                        page_no=chunk.page_no,
+                        chunk_type=chunk.chunk_type,
+                        content=chunk.content,
+                        vector_id=f"{document.document_id}_{global_index}",
+                        permission_level=document.permission_level,
+                        metadata_json=json.dumps(metadata, ensure_ascii=False),
+                    )
+                )
+
+        if replace and start_index == 0:
+            ChunkRepository.replace_chunks(document.document_id, db_chunks)
+            await self.vector_store.upsert_chunks(db_chunks, all_embeddings)
+        else:
+            ChunkRepository.append_chunks(document.document_id, db_chunks)
+            await self.vector_store.upsert_chunks_incremental(db_chunks, all_embeddings)
         return db_chunks
 
     async def search(

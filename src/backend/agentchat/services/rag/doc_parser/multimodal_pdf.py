@@ -24,7 +24,7 @@ class MultimodalPDFParser:
     """将扫描/图形型 PDF 页面解析为可检索的结构化文本。"""
 
     DEFAULT_DPI = 180
-    DEFAULT_MAX_PAGES = 40
+    DEFAULT_MAX_PAGES = 500
     RANGE_PATTERN = re.compile(r"(?P<min>\d+(?:\.\d+)?)\s*[~～\-]\s*(?P<max>\d+(?:\.\d+)?)\s*(?P<unit>mm|cm|m)?", re.I)
 
     def __init__(self, client=None):
@@ -95,20 +95,38 @@ class MultimodalPDFParser:
             logger.warning(f"PDF 页面渲染失败，跳过多模态解析: {err}")
             return []
 
-    def _render_document(self, document, output_dir: Path) -> list[RenderedPDFPage]:
+    def _render_document(self, document, output_dir: Path, start_page: int = 1, end_page: int | None = None) -> list[RenderedPDFPage]:
         output_dir.mkdir(parents=True, exist_ok=True)
         matrix_scale = self._dpi() / 72
         matrix = self._fitz_matrix(matrix_scale)
         pages: list[RenderedPDFPage] = []
+        max_page = end_page or min(document.page_count, self._max_pages())
 
-        for index, page in enumerate(document, start=1):
-            if index > self._max_pages():
+        for index in range(start_page, max_page + 1):
+            if index > document.page_count:
                 break
-            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-            image_path = output_dir / f"page_{index}.png"
-            pixmap.save(image_path)
-            pages.append(RenderedPDFPage(page_no=index, image_path=image_path, width=pixmap.width, height=pixmap.height))
+            page = document[index - 1]
+            rendered = self.render_page(page, index, output_dir, dpi=self._dpi(), matrix=matrix)
+            if rendered:
+                pages.append(rendered)
         return pages
+
+    def render_page(
+        self,
+        page,
+        page_no: int,
+        output_dir: Path,
+        *,
+        dpi: int | None = None,
+        matrix=None,
+    ) -> RenderedPDFPage | None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        scale = (dpi or self._dpi()) / 72
+        render_matrix = matrix or self._fitz_matrix(scale)
+        pixmap = page.get_pixmap(matrix=render_matrix, alpha=False)
+        image_path = output_dir / f"page_{page_no}.png"
+        pixmap.save(image_path)
+        return RenderedPDFPage(page_no=page_no, image_path=image_path, width=pixmap.width, height=pixmap.height)
 
     @staticmethod
     def _fitz_matrix(scale: float):
@@ -119,10 +137,47 @@ class MultimodalPDFParser:
     async def _parse_rendered_pages(self, pages: list[RenderedPDFPage]) -> list[dict]:
         parsed_pages = []
         for page in pages:
-            parsed = await self._parse_page(page)
+            parsed = await self.parse_page_with_retry(page)
             if parsed:
                 parsed_pages.append(parsed)
         return parsed_pages
+
+    async def parse_page_with_retry(
+        self,
+        page: RenderedPDFPage,
+        *,
+        max_retries: int = 3,
+        trace=None,
+    ) -> dict | None:
+        last_error = ""
+        for attempt in range(1, max_retries + 1):
+            try:
+                parsed = await self._parse_page(page)
+                if parsed:
+                    if trace is not None:
+                        trace.record(
+                            "vision",
+                            "success",
+                            f"第 {page.page_no} 页 Vision 解析成功",
+                            page_no=page.page_no,
+                            attempt=attempt,
+                        )
+                    return parsed
+                last_error = "解析结果为空"
+            except Exception as err:
+                last_error = str(err)
+                logger.warning(f"第 {page.page_no} 页多模态解析失败（第 {attempt}/{max_retries} 次）: {err}")
+
+            if trace is not None:
+                trace.record(
+                    "vision",
+                    "retry" if attempt < max_retries else "failed",
+                    f"第 {page.page_no} 页 Vision 解析失败：{last_error}",
+                    page_no=page.page_no,
+                    attempt=attempt,
+                )
+
+        return None
 
     async def _parse_page(self, page: RenderedPDFPage) -> dict | None:
         try:

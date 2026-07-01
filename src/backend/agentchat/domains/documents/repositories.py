@@ -1,5 +1,6 @@
+import json
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from sqlmodel import delete, select
 
@@ -91,11 +92,82 @@ class DocumentRepository:
                 session.commit()
 
     @staticmethod
+    def update_job_progress(
+        job_id: str,
+        *,
+        total_pages: int | None = None,
+        parsed_pages: int | None = None,
+        indexed_chunks: int | None = None,
+        current_stage: str | None = None,
+        checkpoint: dict | None = None,
+    ) -> None:
+        with session_getter() as session:
+            job = session.get(DocumentParseJobTable, job_id)
+            if not job:
+                return
+            if total_pages is not None:
+                job.total_pages = total_pages
+            if parsed_pages is not None:
+                job.parsed_pages = parsed_pages
+            if indexed_chunks is not None:
+                job.indexed_chunks = indexed_chunks
+            if current_stage is not None:
+                job.current_stage = current_stage
+            if checkpoint is not None:
+                job.checkpoint_json = json.dumps(checkpoint, ensure_ascii=False)
+            session.add(job)
+            session.commit()
+
+    @staticmethod
+    def append_job_trace(job_id: str, event: dict[str, Any]) -> None:
+        with session_getter() as session:
+            job = session.get(DocumentParseJobTable, job_id)
+            if not job:
+                return
+            events = DocumentRepository._decode_trace(job.trace_json)
+            events.append(event)
+            job.trace_json = json.dumps(events, ensure_ascii=False)
+            session.add(job)
+            session.commit()
+
+    @staticmethod
+    def load_job_checkpoint(job: DocumentParseJobTable | None) -> dict:
+        if not job or not job.checkpoint_json:
+            return {"next_page": 1, "chunk_seq": 0}
+        try:
+            data = json.loads(job.checkpoint_json)
+        except json.JSONDecodeError:
+            return {"next_page": 1, "chunk_seq": 0}
+        if not isinstance(data, dict):
+            return {"next_page": 1, "chunk_seq": 0}
+        return {
+            "next_page": int(data.get("next_page") or 1),
+            "chunk_seq": int(data.get("chunk_seq") or 0),
+        }
+
+    @staticmethod
     def replace_pages(document_id: str, pages: list[DocumentPageTable]) -> None:
         with session_getter() as session:
             session.exec(delete(DocumentPageTable).where(DocumentPageTable.document_id == document_id))
             for page in pages:
                 session.add(page)
+            session.commit()
+
+    @staticmethod
+    def append_pages(document_id: str, pages: list[DocumentPageTable]) -> None:
+        if not pages:
+            return
+        with session_getter() as session:
+            for page in pages:
+                page.document_id = document_id
+                session.add(page)
+            session.commit()
+
+    @staticmethod
+    def clear_parse_artifacts(document_id: str) -> None:
+        with session_getter() as session:
+            session.exec(delete(DocumentPageTable).where(DocumentPageTable.document_id == document_id))
+            session.exec(delete(DocumentChunkTable).where(DocumentChunkTable.document_id == document_id))
             session.commit()
 
     @staticmethod
@@ -109,3 +181,13 @@ class DocumentRepository:
                 document.status = "deleted"
                 session.add(document)
             session.commit()
+
+    @staticmethod
+    def _decode_trace(trace_json: str | None) -> list[dict]:
+        if not trace_json:
+            return []
+        try:
+            data = json.loads(trace_json)
+        except json.JSONDecodeError:
+            return []
+        return data if isinstance(data, list) else []

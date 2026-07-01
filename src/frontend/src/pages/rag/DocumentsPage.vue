@@ -217,8 +217,8 @@ function formatMap(record: Record<string, number> | undefined) {
               <span>Chunks</span>
             </div>
             <div>
-              <strong>{{ parseSummary.ocr_page_count }}</strong>
-              <span>OCR 页</span>
+              <strong>{{ parseSummary.vision_page_count }}</strong>
+              <span>多模态页</span>
             </div>
             <div>
               <strong>{{ parseSummary.text_char_count }}</strong>
@@ -248,13 +248,13 @@ function formatMap(record: Record<string, number> | undefined) {
           </section>
 
           <section v-if="parsePages.length" class="parse-section">
-            <h3>OCR / 页面明细</h3>
+            <h3>页面明细</h3>
             <div v-for="page in parsePages" :key="page.page_no" class="parse-page-card">
               <div class="parse-card-title">
                 <strong>第 {{ page.page_no }} 页</strong>
                 <span>{{ page.parser }} · {{ page.text_length }} 字符 · {{ page.block_count }} blocks</span>
               </div>
-              <ul v-if="page.sample_blocks.length" class="ocr-block-list">
+              <ul v-if="page.sample_blocks.length" class="parse-block-list">
                 <li v-for="(block, index) in page.sample_blocks" :key="index">
                   <span>{{ block.text || '空文本块' }}</span>
                   <small v-if="block.confidence !== null && block.confidence !== undefined">

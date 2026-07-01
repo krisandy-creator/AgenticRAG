@@ -37,9 +37,9 @@
 | 文档权限 | 管理员上传时选择权限等级，检索时按 `用户角色等级 >= 文档权限等级` 过滤 |
 | 普通用户 | 文档管理页只读，不能上传 |
 | 管理员 | 可上传、删除、查看所有文档 |
-| 文档类型 | docx、扫描 PDF、Excel |
+| 文档类型 | docx、图文 PDF、Excel |
 | docx | 纯文本解析，传统 chunk + overlap |
-| 扫描 PDF | PaddleOCR 本地服务化，输出文本块、坐标、页码 |
+| 图文 PDF | 多模态模型逐页解析，输出页面 Markdown、结构化块和页码 |
 | Excel | 不落结构化库，生成语义 Markdown 索引；计算时通过 CLI / pandas 读取源文件 |
 | 源文件存储 | OSS |
 | 向量库 | 本地轻量级 Milvus |
@@ -113,7 +113,7 @@
 
 核心原则：
 
-- 业务域不直接依赖 OSS、Milvus、PaddleOCR、模型 SDK。
+- 业务域不直接依赖 OSS、Milvus、模型 SDK。
 - 基础设施通过端口接口接入。
 - SSE 事件和 Trace 事件使用同一份事件模型。
 - 第一版 workflow 节点化，但不引入 multi-agent。
@@ -168,8 +168,6 @@ src/backend/agentchat/
 │   │   └── oss_storage.py
 │   ├── vector_store/
 │   │   └── milvus_store.py
-│   ├── ocr/
-│   │   └── paddleocr_client.py
 │   ├── models/
 │   │   ├── chat_model_provider.py
 │   │   ├── embedding_provider.py
@@ -204,14 +202,14 @@ class StoragePort:
 
 第一版实现：`OssStorageAdapter`。
 
-### 7.2 OcrPort
+### 7.2 VisionParsePort
 
 ```python
-class OcrPort:
-    async def parse_pdf(self, file_url: str) -> list["OcrPage"]: ...
+class VisionParsePort:
+    async def parse_pdf(self, file_bytes: bytes) -> list["VisionPage"]: ...
 ```
 
-第一版实现：调用本地 PaddleOCR 服务。
+第一版实现：渲染 PDF 页面后调用多模态模型解析。
 
 ### 7.3 VectorStorePort
 
@@ -270,18 +268,17 @@ docx
 
 第一版不处理 docx 页码。
 
-### 8.3 扫描 PDF
+### 8.3 图文 PDF
 
 ```text
 pdf
--> 调用 PaddleOCR 服务
--> 返回 page_no + text_blocks + bbox
--> 按页聚合文本
--> 按文本块生成 chunk
--> metadata: document_id, page_no, bbox, permission_level
+-> 渲染页面为图片
+-> 调用多模态模型解析页面标题、正文、表格、流程和图示
+-> 生成页面 Markdown 与结构化 chunks
+-> metadata: document_id, page_no, parser=qwen_vl, permission_level
 ```
 
-用户引用只展示到页码级；坐标先进入 metadata，供后续圈选 skill 使用。
+用户引用展示到页码级；结构化字段进入 metadata，供后续检索和 Trace 展示使用。
 
 ### 8.4 Excel
 
@@ -392,7 +389,7 @@ document_parse_job
 - job_id
 - document_id
 - status: pending | running | success | failed
-- parser_type: docx | pdf_ocr | excel_markdown
+- parser_type: docx | pdf_multimodal | excel_markdown
 - error_message
 - started_at
 - finished_at
@@ -414,7 +411,7 @@ document_chunk
 - chunk_id
 - document_id
 - page_no
-- chunk_type: text | ocr_block | excel_markdown
+- chunk_type: text | vision_page | vision_fact | vision_table_row | vision_step | vision_figure | excel_markdown
 - content
 - vector_id
 - permission_level
@@ -700,7 +697,7 @@ docs/diagrams/rag_prototype_architecture.excalidraw
 3. 实现 OSS 文件上传与文档表。
 4. 实现异步解析任务表与 worker 雏形。
 5. 实现 docx 纯文本解析。
-6. 接入 PaddleOCR 服务化接口，完成 PDF OCR 解析。
+6. 接入多模态 PDF 解析，完成图文 PDF 结构化抽取。
 7. 实现 Excel 语义 Markdown 索引。
 8. 接入 embedding 服务与 Milvus 写入。
 9. 实现普通 RAG + rerank + SSE。
@@ -714,7 +711,7 @@ docs/diagrams/rag_prototype_architecture.excalidraw
 
 | 风险 | 处理方式 |
 |------|----------|
-| OCR 服务耗时长 | 必须异步解析，前端展示解析状态 |
+| 多模态解析耗时长 | 必须异步解析，前端展示解析状态 |
 | Milvus metadata filter 不稳定 | 优先检索阶段过滤，不行则扩大召回后应用层过滤 |
 | Excel 计算不安全 | pandas CLI 必须受控执行，限制文件路径和执行环境 |
 | Trace 数据量大 | 第一版全量保存，后续再做保留策略 |

@@ -46,39 +46,70 @@ class MilvusVectorStore:
                     collection_name=self.collection_name,
                     filter=f'document_id == "{self._escape_filter_value(document_id)}"',
                 )
-
-            rows = []
-            for chunk, embedding in zip(chunks, embeddings):
-                if not embedding:
-                    continue
-                rows.append(
-                    {
-                        self.PRIMARY_FIELD: chunk.vector_id,
-                        self.VECTOR_FIELD: embedding,
-                        "chunk_id": chunk.chunk_id,
-                        "document_id": chunk.document_id,
-                        "permission_level": int(chunk.permission_level),
-                        "page_no": int(chunk.page_no or 0),
-                        "chunk_type": chunk.chunk_type,
-                    }
-                )
-
-            if rows:
-                self.client.upsert(collection_name=self.collection_name, data=rows)
-            self.last_provider = self.mode
-            self.last_debug = {
-                "provider": self.mode,
-                "collection": self.collection_name,
-                "uri": self.uri,
-                "upserted": len(rows),
-                "documents": document_ids,
-            }
-            logger.info("Milvus 向量写入完成 collection={} count={}", self.collection_name, len(rows))
+            await self._upsert_rows(chunks, embeddings)
         except Exception as err:
             self.last_provider = f"{self.mode}_upsert_failed"
             self.last_debug = {"provider": self.last_provider, "error": str(err)}
             logger.warning(f"Milvus 向量写入失败，检索将降级: {err}")
         return None
+
+    async def upsert_chunks_incremental(self, chunks, embeddings) -> None:
+        if not chunks or not embeddings:
+            return None
+
+        vector_dim = len(embeddings[0]) if embeddings and embeddings[0] else 0
+        if vector_dim <= 0 or not self._ensure_collection(vector_dim):
+            return None
+
+        try:
+            await self._upsert_rows(chunks, embeddings)
+        except Exception as err:
+            self.last_provider = f"{self.mode}_upsert_failed"
+            self.last_debug = {"provider": self.last_provider, "error": str(err)}
+            logger.warning(f"Milvus 增量向量写入失败，检索将降级: {err}")
+        return None
+
+    async def delete_by_document(self, document_id: str) -> None:
+        if not document_id:
+            return
+        if self.client is None and not self._connect():
+            return
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                filter=f'document_id == "{self._escape_filter_value(document_id)}"',
+            )
+        except Exception as err:
+            logger.warning(f"Milvus 删除文档向量失败 document_id={document_id}: {err}")
+
+    async def _upsert_rows(self, chunks, embeddings) -> None:
+        rows = []
+        for chunk, embedding in zip(chunks, embeddings):
+            if not embedding:
+                continue
+            rows.append(
+                {
+                    self.PRIMARY_FIELD: chunk.vector_id,
+                    self.VECTOR_FIELD: embedding,
+                    "chunk_id": chunk.chunk_id,
+                    "document_id": chunk.document_id,
+                    "permission_level": int(chunk.permission_level),
+                    "page_no": int(chunk.page_no or 0),
+                    "chunk_type": chunk.chunk_type,
+                }
+            )
+
+        if rows:
+            self.client.upsert(collection_name=self.collection_name, data=rows)
+        self.last_provider = self.mode
+        self.last_debug = {
+            "provider": self.mode,
+            "collection": self.collection_name,
+            "uri": self.uri,
+            "upserted": len(rows),
+            "documents": sorted({chunk.document_id for chunk in chunks}),
+        }
+        logger.info("Milvus 向量写入完成 collection={} count={}", self.collection_name, len(rows))
 
     async def search(self, query_vector: list[float], filters: dict, top_k: int) -> list[VectorSearchResult]:
         if not query_vector or not self._ensure_collection(len(query_vector)):

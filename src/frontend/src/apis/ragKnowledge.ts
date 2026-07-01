@@ -57,7 +57,7 @@ export interface ParseTraceChunk {
 export interface ParseTraceSummary {
   page_count: number
   chunk_count: number
-  ocr_page_count: number
+  vision_page_count: number
   text_char_count: number
   parser_counts: Record<string, number>
   chunk_type_counts: Record<string, number>

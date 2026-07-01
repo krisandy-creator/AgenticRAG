@@ -701,7 +701,7 @@ pre {
 .parse-summary-grid span,
 .parse-card-title span,
 .chunk-preview span,
-.ocr-block-list small {
+.parse-block-list small {
     color: var(--rag-muted);
     font-size: 12px;
 }
@@ -734,14 +734,14 @@ pre {
     align-items: center;
 }
 
-.ocr-block-list {
+.parse-block-list {
     display: grid;
     gap: 8px;
     margin-top: 10px;
     list-style: none;
 }
 
-.ocr-block-list li {
+.parse-block-list li {
     display: grid;
     gap: 3px;
     padding: 8px;

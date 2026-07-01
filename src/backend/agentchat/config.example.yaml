@@ -92,6 +92,28 @@ rag:
     chunk_size: 500 # 知识库文档分块的最大字符数
     overlap_size: 100 # 文档分块之间的重叠字符数
 
+  # 多模态 PDF 解析（页窗口 + Vision 并发 + 微批索引）
+  multimodal_parse:
+    enabled: true
+    dpi: 180
+    max_pages: 500
+    page_batch_size: 20
+    vision_max_concurrency_per_doc: 4
+    vision_max_retries: 3
+    vision_global_limit: 10
+    vision_timeout_seconds: 120
+    text_layer_min_chars: 80
+    blank_page_max_nonwhite_ratio: 0.005
+    embedding_batch_size: 32
+    embedding_api_batch_size: 10
+    embedding_max_concurrency: 5
+
+  # ARQ 文档解析 Worker
+  parse_worker:
+    max_concurrent_documents: 2
+    arq_queue_name: "rag:parse"
+    job_timeout_seconds: 7200
+
   # ES数据库配置，主要做关键词召回
   elasticsearch:
     hosts: "http://127.0.0.1:9200" # Elasticsearch 连接地址。如果 'enable_elasticsearch' 为 False，则不需要填写。

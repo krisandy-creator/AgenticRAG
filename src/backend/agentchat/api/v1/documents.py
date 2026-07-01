@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from agentchat.api.services.user import get_login_user
 from agentchat.domains.documents.services import DocumentService
@@ -16,13 +16,12 @@ async def list_documents(login_user=Depends(get_login_user)):
 
 @router.post("/upload")
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     permission_level: int = Form(10),
     login_user=Depends(get_login_user),
 ):
     user = EnterpriseIdentityService.resolve_user(login_user)
-    document = await DocumentService().upload_document(file, permission_level, user.user_id, background_tasks)
+    document = await DocumentService().upload_document(file, permission_level, user.user_id)
     return resp_200(data=document.to_dict())
 
 

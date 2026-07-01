@@ -1,17 +1,17 @@
 import json
-import re
 import zipfile
 from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
 
 from agentchat.domains.documents.entities import DocumentPageTable
+from agentchat.domains.documents.parse_trace import ParseTraceCollector
 from agentchat.domains.documents.repositories import DocumentRepository
 from agentchat.domains.indexing.chunking import ChunkingService, TextChunk
 from agentchat.domains.indexing.services import IndexingService
-from agentchat.infrastructure.ocr.paddleocr_client import PaddleOcrClient
 from agentchat.infrastructure.storage.oss_storage import OssStorageAdapter
-from agentchat.services.rag.doc_parser.multimodal_pdf import multimodal_pdf_parser
+from agentchat.services.rag.doc_parser.pdf_config import load_pdf_parse_config
+from agentchat.services.rag.doc_parser.pdf_parse_pipeline import PDFParsePipeline
 
 
 async def parse_document_task(document_id: str) -> None:
@@ -21,93 +21,49 @@ async def parse_document_task(document_id: str) -> None:
         return
 
     storage = OssStorageAdapter()
-    chunker = ChunkingService()
-    indexing = IndexingService()
     DocumentRepository.update_document_status(document_id, "parsing")
     DocumentRepository.update_job_status(job.job_id, "running")
 
     try:
         data = await storage.download(document.oss_key)
-        pages, chunks = await _parse_by_type(document, data, chunker, storage)
-        DocumentRepository.replace_pages(document_id, pages)
-        await indexing.index_chunks(document, chunks)
+        if document.file_type == "pdf":
+            await PDFParsePipeline(load_pdf_parse_config()).run(document, job, data)
+        else:
+            await _parse_non_pdf(document, job, data)
         DocumentRepository.update_job_status(job.job_id, "success")
         DocumentRepository.update_document_status(document_id, "ready")
     except Exception as err:
         DocumentRepository.update_job_status(job.job_id, "failed", str(err))
         DocumentRepository.update_document_status(document_id, "failed", str(err))
+        job = DocumentRepository.get_latest_job(document_id)
+        if job:
+            ParseTraceCollector(job.job_id).record("job", "failed", str(err))
 
 
-async def _parse_by_type(document, data: bytes, chunker: ChunkingService, storage: OssStorageAdapter):
+async def _parse_non_pdf(document, job, data: bytes) -> None:
+    chunker = ChunkingService()
+    indexing = IndexingService()
+    trace = ParseTraceCollector(job.job_id)
+
+    pages, chunks = await _parse_by_type(document, data, chunker)
+    DocumentRepository.clear_parse_artifacts(document.document_id)
+    DocumentRepository.append_pages(document.document_id, pages)
+    trace.record("parse", "success", f"非 PDF 解析完成，chunk={len(chunks)}")
+    DocumentRepository.update_job_progress(
+        job.job_id,
+        parsed_pages=len(pages),
+        indexed_chunks=len(chunks),
+        current_stage="indexing",
+    )
+    await indexing.index_chunks(document, chunks)
+    DocumentRepository.update_job_progress(job.job_id, indexed_chunks=len(chunks), current_stage="done")
+
+
+async def _parse_by_type(document, data: bytes, chunker: ChunkingService):
     if document.file_type == "docx":
         text = _extract_docx_text(data)
         chunks = chunker.split_text(text, page_no=None, chunk_type="text", metadata={"parser": "docx_plain_text"})
         return [], chunks
-
-    if document.file_type == "pdf":
-        text_pages = _extract_pdf_text_pages(data)
-        if text_pages:
-            pages = []
-            chunks: list[TextChunk] = []
-            for page in text_pages:
-                page_no = page["page_no"]
-                text = page["text"]
-                pages.append(
-                    DocumentPageTable(
-                        document_id=document.document_id,
-                        page_no=page_no,
-                        text=text,
-                        blocks_json="[]",
-                    )
-                )
-                chunks.extend(
-                    chunker.split_text(
-                        text,
-                        page_no=page_no,
-                        chunk_type="text",
-                        metadata={"parser": "pymupdf_text"},
-                    )
-                )
-            return pages, chunks
-
-        vision_pages = await multimodal_pdf_parser.parse_pdf_bytes(data)
-        if vision_pages:
-            return _build_vision_pages(document.document_id, vision_pages, chunker)
-
-        ocr_error = None
-        try:
-            file_url = await storage.presigned_url(document.oss_key)
-            ocr_pages = await PaddleOcrClient().parse_pdf(file_url)
-        except Exception as err:
-            ocr_pages = []
-            ocr_error = err
-        pages = []
-        chunks: list[TextChunk] = []
-        for page in ocr_pages:
-            page_no = int(page.get("page_no") or len(pages) + 1)
-            text = page.get("text") or _blocks_to_text(page.get("blocks") or [])
-            blocks = page.get("blocks") or []
-            pages.append(
-                DocumentPageTable(
-                    document_id=document.document_id,
-                    page_no=page_no,
-                    text=text,
-                    blocks_json=json.dumps(blocks, ensure_ascii=False),
-                )
-            )
-            chunks.extend(
-                chunker.split_text(
-                    text,
-                    page_no=page_no,
-                    chunk_type="ocr_block",
-                    metadata={"parser": "paddleocr", "blocks": blocks[:5]},
-                )
-            )
-        if not chunks:
-            if ocr_error:
-                raise ValueError(f"PDF 解析未得到有效文本，多模态解析和 OCR 均失败: {ocr_error}")
-            raise ValueError("PDF 解析未得到有效文本，请检查 OCR 服务配置或文档内容。")
-        return pages, chunks
 
     if document.file_type == "excel":
         markdown = _extract_xlsx_markdown(document.file_name, data)
@@ -129,24 +85,6 @@ def _extract_docx_text(data: bytes) -> str:
         if line:
             paragraphs.append(line)
     return "\n".join(paragraphs)
-
-
-def _extract_pdf_text_pages(data: bytes) -> list[dict]:
-    try:
-        import fitz
-    except ImportError:
-        return []
-
-    pages = []
-    try:
-        with fitz.open(stream=data, filetype="pdf") as document:
-            for index, page in enumerate(document, start=1):
-                text = page.get_text("text").strip()
-                if text:
-                    pages.append({"page_no": index, "text": text})
-    except Exception:
-        return []
-    return pages
 
 
 def _extract_xlsx_markdown(file_name: str, data: bytes) -> str:
@@ -254,7 +192,3 @@ def _build_vision_pages(document_id: str, vision_pages: list[dict], chunker: Chu
             )
 
     return pages, chunks
-
-
-def _blocks_to_text(blocks: list[dict]) -> str:
-    return "\n".join(str(block.get("text", "")) for block in blocks if block.get("text"))

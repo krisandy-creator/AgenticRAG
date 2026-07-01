@@ -342,13 +342,13 @@
       "updated": 1,
       "link": null,
       "locked": false,
-      "text": "PaddleOCR 服务\n文本块 + 坐标 + 页码",
+      "text": "多模态 PDF 解析\n页面 Markdown + 结构化块 + 页码",
       "fontSize": 20,
       "fontFamily": 2,
       "textAlign": "center",
       "verticalAlign": "top",
       "containerId": null,
-      "originalText": "PaddleOCR 服务\n文本块 + 坐标 + 页码",
+      "originalText": "多模态 PDF 解析\n页面 Markdown + 结构化块 + 页码",
       "lineHeight": 1.25
     },
     {

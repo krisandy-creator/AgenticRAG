@@ -69,6 +69,14 @@ def start_services():
         )
         processes.append(backend_process)
 
+        print(f"🚀 [Step 2b] 启动 ARQ 文档解析 Worker (cwd: {BACKEND_DIR})...")
+        worker_process = subprocess.Popen(
+            [sys.executable, "-m", "arq", "agentchat.workers.arq_worker.WorkerSettings"],
+            cwd=BACKEND_DIR,
+            shell=False,
+        )
+        processes.append(worker_process)
+
         time.sleep(2)
 
         # --- 启动前端 ---

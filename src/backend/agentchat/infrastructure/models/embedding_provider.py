@@ -8,10 +8,25 @@ class EmbeddingProvider:
         self.last_provider = "unknown"
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        try:
-            from agentchat.services.rag.embedding import get_embedding
+        return await self.embed_texts_batched(texts)
 
-            embeddings = await get_embedding(texts)
+    async def embed_texts_batched(
+        self,
+        texts: list[str],
+        *,
+        api_batch_size: int = 10,
+        max_concurrency: int = 5,
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+        try:
+            from agentchat.services.rag.embedding import get_embedding_batched
+
+            embeddings = await get_embedding_batched(
+                texts,
+                api_batch_size=api_batch_size,
+                max_concurrency=max_concurrency,
+            )
             if embeddings:
                 self.last_provider = "configured"
                 return embeddings

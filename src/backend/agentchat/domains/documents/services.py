@@ -4,18 +4,19 @@ from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, HTTPException, UploadFile
+from fastapi import HTTPException, UploadFile
 
 from agentchat.domains.documents.entities import DocumentParseJobTable, DocumentPageTable, DocumentTable
 from agentchat.domains.documents.repositories import DocumentRepository
 from agentchat.domains.indexing.entities import DocumentChunkTable
 from agentchat.infrastructure.storage.oss_storage import OssStorageAdapter
-from agentchat.workers.document_parse_worker import parse_document_task
+from agentchat.domains.documents.parse_trace import ParseTraceCollector
+from agentchat.workers.parse_queue import enqueue_document_parse
 
 
 SUPPORTED_FILE_TYPES = {
     ".docx": ("docx", "docx"),
-    ".pdf": ("pdf", "pdf_ocr"),
+    ".pdf": ("pdf", "pdf_multimodal"),
     ".xlsx": ("excel", "excel_markdown"),
     ".xls": ("excel", "excel_markdown"),
 }
@@ -37,7 +38,6 @@ class DocumentService:
         file: UploadFile,
         permission_level: int,
         uploaded_by: str,
-        background_tasks: BackgroundTasks,
     ) -> DocumentTable:
         data = await file.read()
         if not data:
@@ -59,7 +59,12 @@ class DocumentService:
         )
         job = DocumentParseJobTable(document_id=document.document_id, parser_type=parser_type)
         created = DocumentRepository.create_document(document, job)
-        background_tasks.add_task(parse_document_task, created.document_id)
+        try:
+            await enqueue_document_parse(created.document_id)
+        except Exception as err:
+            DocumentRepository.update_document_status(created.document_id, "failed", f"解析任务入队失败: {err}")
+            DocumentRepository.update_job_status(job.job_id, "failed", f"解析任务入队失败: {err}")
+            raise HTTPException(status_code=503, detail="解析任务入队失败，请确认 Redis 与 ARQ Worker 已启动") from err
         return created
 
     def list_documents(self, access_level: int, is_admin: bool) -> list[dict]:
@@ -108,36 +113,49 @@ class DocumentService:
                 chunk_summaries.append(DocumentService._chunk_summary(chunk, metadata))
 
         page_summaries = [DocumentService._page_summary(page) for page in pages]
-        ocr_pages = [page for page in page_summaries if page["parser"] == "paddleocr"]
         vision_pages = [page for page in page_summaries if page["parser"] == "qwen_vl"]
         text_char_count = sum(len(page.text or "") for page in pages) or sum(len(chunk.content or "") for chunk in chunks)
 
         summary = {
             "page_count": len(pages),
             "chunk_count": len(chunks),
-            "ocr_page_count": len(ocr_pages),
             "vision_page_count": len(vision_pages),
             "text_char_count": text_char_count,
             "parser_counts": dict(parser_counts),
             "chunk_type_counts": dict(chunk_type_counts),
+            "total_pages": getattr(job, "total_pages", None),
+            "parsed_pages": getattr(job, "parsed_pages", 0) or 0,
+            "indexed_chunks": getattr(job, "indexed_chunks", 0) or 0,
+            "current_stage": getattr(job, "current_stage", None),
         }
+
+        trace_events = ParseTraceCollector.load_events(getattr(job, "trace_json", None))
 
         return {
             "summary": summary,
-            "events": DocumentService._parse_events(document, job, summary),
+            "events": DocumentService._parse_events(document, job, summary, trace_events),
+            "trace_log": trace_events[-200:],
             "pages": page_summaries,
             "chunks": chunk_summaries,
         }
 
     @staticmethod
-    def _parse_events(document: DocumentTable, job: DocumentParseJobTable, summary: dict) -> list[dict]:
+    def _parse_events(document: DocumentTable, job: DocumentParseJobTable, summary: dict, trace_events: list[dict]) -> list[dict]:
         failed = job.status == "failed"
         success = job.status == "success"
         running = job.status == "running"
         has_pages = summary["page_count"] > 0
         has_chunks = summary["chunk_count"] > 0
+        total_pages = summary.get("total_pages") or summary["page_count"]
+        parsed_pages = summary.get("parsed_pages") or summary["page_count"]
 
-        return [
+        progress_message = ""
+        if total_pages:
+            progress_message = f"进度 {parsed_pages}/{total_pages} 页"
+        if summary.get("current_stage"):
+            progress_message = f"{progress_message}，阶段 {summary['current_stage']}".strip("，")
+
+        events = [
             {
                 "stage": "接收文件",
                 "status": "success",
@@ -147,36 +165,52 @@ class DocumentService:
             {
                 "stage": "解析文本",
                 "status": DocumentService._stage_status(success or has_pages or has_chunks, running, failed),
-                "message": DocumentService._parse_message(job, summary),
+                "message": DocumentService._parse_message(job, summary, progress_message),
                 "at": DocumentService._to_iso(job.started_at),
             },
             {
                 "stage": "切分 Chunk",
                 "status": DocumentService._stage_status(has_chunks, running, failed),
-                "message": f"已生成 {summary['chunk_count']} 个 chunk。",
+                "message": f"已生成 {summary['chunk_count']} 个 chunk。{progress_message}".strip(),
                 "at": DocumentService._to_iso(job.finished_at if success else None),
             },
             {
                 "stage": "写入索引",
                 "status": DocumentService._stage_status(success, running and has_chunks, failed),
-                "message": "索引写入完成，可用于问答检索。" if success else "等待解析完成后写入索引。",
+                "message": "索引写入完成，可用于问答检索。" if success else "文档未完全解析前不可检索。",
                 "at": DocumentService._to_iso(job.finished_at),
             },
         ]
 
+        for trace_event in trace_events[-20:]:
+            events.append(
+                {
+                    "stage": trace_event.get("stage") or "trace",
+                    "status": trace_event.get("status") or "info",
+                    "message": trace_event.get("message") or "",
+                    "at": trace_event.get("at"),
+                    "page_no": trace_event.get("page_no"),
+                    "attempt": trace_event.get("attempt"),
+                }
+            )
+        return events
+
     @staticmethod
-    def _parse_message(job: DocumentParseJobTable, summary: dict) -> str:
+    def _parse_message(job: DocumentParseJobTable, summary: dict, progress_message: str = "") -> str:
         if job.status == "failed":
             return job.error_message or "解析失败，暂无错误详情。"
+        base = ""
         if summary.get("vision_page_count"):
-            return f"多模态解析 {summary['vision_page_count']} 页，累计 {summary['text_char_count']} 个字符。"
-        if summary["ocr_page_count"]:
-            return f"OCR 识别 {summary['ocr_page_count']} 页，累计 {summary['text_char_count']} 个字符。"
-        if summary["page_count"]:
-            return f"文本解析 {summary['page_count']} 页，累计 {summary['text_char_count']} 个字符。"
-        if summary["chunk_count"]:
-            return f"解析为结构化文本，累计 {summary['text_char_count']} 个字符。"
-        return "解析任务已创建，等待后台 worker 处理。"
+            base = f"多模态解析 {summary['vision_page_count']} 页，累计 {summary['text_char_count']} 个字符。"
+        elif summary["page_count"]:
+            base = f"文本解析 {summary['page_count']} 页，累计 {summary['text_char_count']} 个字符。"
+        elif summary["chunk_count"]:
+            base = f"解析为结构化文本，累计 {summary['text_char_count']} 个字符。"
+        else:
+            base = "解析任务已入队，等待 ARQ worker 处理。"
+        if progress_message:
+            return f"{base} {progress_message}".strip()
+        return base
 
     @staticmethod
     def _stage_status(done: bool, running: bool, failed: bool) -> str:
@@ -191,10 +225,10 @@ class DocumentService:
     @staticmethod
     def _page_summary(page: DocumentPageTable) -> dict:
         blocks = DocumentService._decode_json_list(page.blocks_json)
-        parser = "pymupdf_text"
+        parser = "qwen_vl"
         if blocks:
             first_block = blocks[0] if isinstance(blocks[0], dict) else {}
-            parser = str(first_block.get("parser") or first_block.get("type") or "paddleocr")
+            parser = str(first_block.get("parser") or first_block.get("type") or "qwen_vl")
         return {
             "page_no": page.page_no,
             "text_length": len(page.text or ""),

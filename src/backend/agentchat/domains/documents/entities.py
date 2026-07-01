@@ -42,6 +42,12 @@ class DocumentParseJobTable(SQLModelSerializable, table=True):
     status: str = Field(default="pending", index=True)
     parser_type: str = Field(index=True)
     error_message: Optional[str] = Field(default=None, sa_column=Column(Text))
+    total_pages: Optional[int] = Field(default=None)
+    parsed_pages: int = Field(default=0)
+    indexed_chunks: int = Field(default=0)
+    current_stage: Optional[str] = Field(default=None, max_length=32)
+    checkpoint_json: Optional[str] = Field(default=None, sa_column=Column(Text))
+    trace_json: Optional[str] = Field(default="[]", sa_column=Column(Text))
     started_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime))
     finished_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime))
     created_at: Optional[datetime] = Field(

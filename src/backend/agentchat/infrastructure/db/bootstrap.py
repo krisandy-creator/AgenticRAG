@@ -1,4 +1,5 @@
-from sqlmodel import SQLModel, select
+from loguru import logger
+from sqlmodel import SQLModel, select, text
 
 from agentchat.api.services.user import UserService
 from agentchat.database import engine, ensure_mysql_database, import_enterprise_rag_models
@@ -8,11 +9,36 @@ from agentchat.database.models.user_role import UserRole
 from agentchat.database.session import session_getter
 
 
+_PARSE_JOB_COLUMNS = {
+    "total_pages": "INT NULL",
+    "parsed_pages": "INT NOT NULL DEFAULT 0",
+    "indexed_chunks": "INT NOT NULL DEFAULT 0",
+    "current_stage": "VARCHAR(32) NULL",
+    "checkpoint_json": "LONGTEXT NULL",
+    "trace_json": "LONGTEXT NULL",
+}
+
+
 async def init_enterprise_rag_database() -> None:
     ensure_mysql_database()
     import_enterprise_rag_models()
     SQLModel.metadata.create_all(engine)
+    _ensure_parse_job_columns()
     _ensure_demo_identity()
+
+
+def _ensure_parse_job_columns() -> None:
+    with engine.connect() as conn:
+        existing = {
+            row[0]
+            for row in conn.execute(text("SHOW COLUMNS FROM document_parse_job")).fetchall()
+        }
+        for column, ddl in _PARSE_JOB_COLUMNS.items():
+            if column in existing:
+                continue
+            conn.execute(text(f"ALTER TABLE document_parse_job ADD COLUMN {column} {ddl}"))
+            logger.info("已为 document_parse_job 添加列 {}", column)
+        conn.commit()
 
 
 def _ensure_demo_identity() -> None:
