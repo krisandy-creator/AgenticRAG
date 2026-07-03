@@ -25,33 +25,18 @@ class ChunkRepository:
             session.commit()
 
     @staticmethod
-    def list_searchable_chunks(access_level: int, limit: int = 1000) -> list[tuple[DocumentChunkTable, DocumentTable]]:
-        with session_getter() as session:
-            statement = (
-                select(DocumentChunkTable, DocumentTable)
-                .where(DocumentChunkTable.document_id == DocumentTable.document_id)
-                .where(DocumentTable.status == "ready")
-                .where(DocumentChunkTable.permission_level <= access_level)
-                .limit(limit)
-            )
-            return session.exec(statement).all()
-
-    @staticmethod
-    def list_searchable_chunks_by_vector_ids(
-        vector_ids: list[str],
-        access_level: int,
-    ) -> list[tuple[DocumentChunkTable, DocumentTable]]:
-        if not vector_ids:
+    def list_chunks_by_ids(chunk_ids: list[str]) -> list[tuple[DocumentChunkTable, DocumentTable]]:
+        if not chunk_ids:
             return []
 
-        order = {vector_id: index for index, vector_id in enumerate(vector_ids)}
+        order = {chunk_id: index for index, chunk_id in enumerate(chunk_ids)}
         with session_getter() as session:
             statement = (
                 select(DocumentChunkTable, DocumentTable)
                 .where(DocumentChunkTable.document_id == DocumentTable.document_id)
                 .where(DocumentTable.status == "ready")
-                .where(DocumentChunkTable.permission_level <= access_level)
-                .where(DocumentChunkTable.vector_id.in_(vector_ids))
+                .where(DocumentChunkTable.status == "active")
+                .where(DocumentChunkTable.chunk_id.in_(chunk_ids))
             )
             rows = session.exec(statement).all()
-            return sorted(rows, key=lambda row: order.get(row[0].vector_id, len(order)))
+            return sorted(rows, key=lambda row: order.get(row[0].chunk_id, len(order)))

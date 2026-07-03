@@ -10,6 +10,7 @@ from agentchat.domains.documents.entities import DocumentParseJobTable, Document
 from agentchat.domains.documents.repositories import DocumentRepository
 from agentchat.domains.indexing.entities import DocumentChunkTable
 from agentchat.infrastructure.storage.oss_storage import OssStorageAdapter
+from agentchat.infrastructure.search_store.elasticsearch_store import ElasticsearchChunkStore
 from agentchat.infrastructure.vector_store.milvus_store import MilvusVectorStore
 from agentchat.domains.documents.parse_trace import ParseTraceCollector
 from agentchat.workers.parse_queue import enqueue_document_parse
@@ -97,6 +98,7 @@ class DocumentService:
             raise HTTPException(status_code=403, detail="只有管理员可以删除文档")
         DocumentRepository.delete_document(document_id)
         await MilvusVectorStore().delete_by_document(document_id)
+        await ElasticsearchChunkStore().delete_by_document(document_id)
 
     @staticmethod
     def _build_parse_trace(document: DocumentTable, job: DocumentParseJobTable) -> dict:

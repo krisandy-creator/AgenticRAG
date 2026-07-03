@@ -18,13 +18,34 @@ _PARSE_JOB_COLUMNS = {
     "trace_json": "LONGTEXT NULL",
 }
 
+_CHUNK_MANIFEST_COLUMNS = {
+    "content_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+    "index_version": "INT NOT NULL DEFAULT 1",
+    "status": "VARCHAR(32) NOT NULL DEFAULT 'active'",
+}
+
 
 async def init_enterprise_rag_database() -> None:
     ensure_mysql_database()
     import_enterprise_rag_models()
     SQLModel.metadata.create_all(engine)
     _ensure_parse_job_columns()
+    _ensure_chunk_manifest_columns()
     _ensure_demo_identity()
+
+
+def _ensure_chunk_manifest_columns() -> None:
+    with engine.connect() as conn:
+        existing = {
+            row[0]
+            for row in conn.execute(text("SHOW COLUMNS FROM document_chunk")).fetchall()
+        }
+        for column, ddl in _CHUNK_MANIFEST_COLUMNS.items():
+            if column in existing:
+                continue
+            conn.execute(text(f"ALTER TABLE document_chunk ADD COLUMN {column} {ddl}"))
+            logger.info("已为 document_chunk 添加列 {}", column)
+        conn.commit()
 
 
 def _ensure_parse_job_columns() -> None:

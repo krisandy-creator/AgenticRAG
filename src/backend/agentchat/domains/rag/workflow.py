@@ -101,6 +101,7 @@ class RagWorkflow:
                 reranked_pool,
                 expansion.structured_intent,
                 rerank_top_k,
+                rerank_provider=self.reranker.last_provider,
             )
             yield event(
                 "evidence_selected",

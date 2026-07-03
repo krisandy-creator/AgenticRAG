@@ -1,14 +1,10 @@
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 from loguru import logger
 
+from agentchat.domains.indexing.exceptions import IndexingWriteError
 from agentchat.settings import app_settings
-from agentchat.utils.project_paths import resolve_storage_path
-
-T = TypeVar("T")
 
 
 @dataclass
@@ -19,10 +15,9 @@ class VectorSearchResult:
 
 
 class MilvusVectorStore:
-    """RAG 知识库向量存储，支持 Milvus Lite 和 standalone Milvus。"""
+    """远程 Milvus 向量存储。"""
 
     DEFAULT_COLLECTION_NAME = "global_knowledge_chunks"
-    DEFAULT_LITE_PATH = ".rag_storage/milvus_lite.db"
     VECTOR_FIELD = "embedding"
     PRIMARY_FIELD = "vector_id"
 
@@ -36,70 +31,76 @@ class MilvusVectorStore:
         self.last_debug: dict[str, Any] = {}
 
     async def upsert_chunks(self, vector_rows: list[dict[str, Any]], embeddings) -> None:
-        if not vector_rows or not embeddings:
-            return None
+        self._validate_write_inputs(vector_rows, embeddings)
+        document_id = vector_rows[0]["document_id"]
+        chunk_count = len(vector_rows)
+        vector_dim = len(embeddings[0]) if embeddings[0] else 0
+        if vector_dim <= 0:
+            raise IndexingWriteError("milvus", document_id, chunk_count, "向量维度非法")
 
-        vector_dim = len(embeddings[0]) if embeddings and embeddings[0] else 0
+        self._ensure_collection_or_raise(vector_dim, document_id=document_id, chunk_count=chunk_count)
 
-        def _run() -> None:
-            if vector_dim <= 0 or not self._ensure_collection(vector_dim):
-                return
-            document_ids = sorted({row["document_id"] for row in vector_rows})
-            for document_id in document_ids:
+        document_ids = sorted({row["document_id"] for row in vector_rows})
+        try:
+            for doc_id in document_ids:
                 self.client.delete(
                     collection_name=self.collection_name,
-                    filter=f'document_id == "{self._escape_filter_value(document_id)}"',
+                    filter=f'document_id == "{self._escape_filter_value(doc_id)}"',
                 )
             self._upsert_rows(vector_rows, embeddings)
-
-        try:
-            await self._run_lite_safe(_run)
+        except IndexingWriteError:
+            raise
         except Exception as err:
-            self.last_provider = f"{self.mode}_upsert_failed"
-            self.last_debug = {"provider": self.last_provider, "error": str(err)}
-            logger.warning(f"Milvus 向量写入失败，检索将降级: {err}")
-        return None
+            raise IndexingWriteError("milvus", document_id, chunk_count, f"向量写入失败: {err}") from err
 
     async def upsert_chunks_incremental(self, vector_rows: list[dict[str, Any]], embeddings) -> None:
-        if not vector_rows or not embeddings:
-            return None
+        self._validate_write_inputs(vector_rows, embeddings)
+        document_id = vector_rows[0]["document_id"]
+        chunk_count = len(vector_rows)
+        vector_dim = len(embeddings[0]) if embeddings[0] else 0
+        if vector_dim <= 0:
+            raise IndexingWriteError("milvus", document_id, chunk_count, "向量维度非法")
 
-        vector_dim = len(embeddings[0]) if embeddings and embeddings[0] else 0
-
-        def _run() -> None:
-            if vector_dim <= 0 or not self._ensure_collection(vector_dim):
-                return
-            self._upsert_rows(vector_rows, embeddings)
-
+        self._ensure_collection_or_raise(vector_dim, document_id=document_id, chunk_count=chunk_count)
         try:
-            await self._run_lite_safe(_run)
+            self._upsert_rows(vector_rows, embeddings)
+        except IndexingWriteError:
+            raise
         except Exception as err:
-            self.last_provider = f"{self.mode}_upsert_failed"
-            self.last_debug = {"provider": self.last_provider, "error": str(err)}
-            logger.warning(f"Milvus 增量向量写入失败，检索将降级: {err}")
-        return None
+            raise IndexingWriteError("milvus", document_id, chunk_count, f"向量增量写入失败: {err}") from err
+
+    @staticmethod
+    def _validate_write_inputs(vector_rows: list[dict[str, Any]], embeddings) -> None:
+        if not vector_rows or not embeddings:
+            raise IndexingWriteError("milvus", "", 0, "vector_rows 或 embeddings 为空")
+        if len(vector_rows) != len(embeddings):
+            document_id = vector_rows[0].get("document_id", "")
+            raise IndexingWriteError(
+                "milvus",
+                str(document_id),
+                len(vector_rows),
+                f"vector_rows({len(vector_rows)}) 与 embeddings({len(embeddings)}) 数量不匹配",
+            )
 
     async def delete_by_document(self, document_id: str) -> None:
         if not document_id:
             return
-
-        def _run() -> None:
-            if self.client is None and not self._connect():
-                return
+        if self.client is None and not self._connect():
+            return
+        try:
             self.client.delete(
                 collection_name=self.collection_name,
                 filter=f'document_id == "{self._escape_filter_value(document_id)}"',
             )
-
-        try:
-            await self._run_lite_safe(_run)
         except Exception as err:
-            logger.warning(f"Milvus 删除文档向量失败 document_id={document_id}: {err}")
+            logger.warning("Milvus 删除文档向量失败 document_id={}: {}", document_id, err)
 
     def _upsert_rows(self, vector_rows: list[dict[str, Any]], embeddings) -> None:
         rows = []
+        skipped = 0
         for row, embedding in zip(vector_rows, embeddings):
             if not embedding:
+                skipped += 1
                 continue
             rows.append(
                 {
@@ -110,11 +111,23 @@ class MilvusVectorStore:
                     "permission_level": int(row["permission_level"]),
                     "page_no": int(row.get("page_no") or 0),
                     "chunk_type": row["chunk_type"],
+                    "index_version": int(row.get("index_version") or 1),
                 }
             )
 
-        if rows:
-            self.client.upsert(collection_name=self.collection_name, data=rows)
+        if skipped:
+            document_id = vector_rows[0]["document_id"]
+            raise IndexingWriteError(
+                "milvus",
+                document_id,
+                len(vector_rows),
+                f"存在 {skipped} 个空 embedding，拒绝写入",
+            )
+        if not rows:
+            document_id = vector_rows[0]["document_id"]
+            raise IndexingWriteError("milvus", document_id, len(vector_rows), "没有可写入的向量行")
+
+        self.client.upsert(collection_name=self.collection_name, data=rows)
         self.last_provider = self.mode
         self.last_debug = {
             "provider": self.mode,
@@ -128,13 +141,10 @@ class MilvusVectorStore:
     async def search(self, query_vector: list[float], filters: dict, top_k: int) -> list[VectorSearchResult]:
         if not query_vector:
             return []
+        if not self._ensure_collection(len(query_vector)):
+            return []
 
-        results: list[VectorSearchResult] = []
-
-        def _run() -> None:
-            nonlocal results
-            if not self._ensure_collection(len(query_vector)):
-                return
+        try:
             raw_hits = self.client.search(
                 collection_name=self.collection_name,
                 data=[query_vector],
@@ -147,6 +157,7 @@ class MilvusVectorStore:
                     "permission_level",
                     "page_no",
                     "chunk_type",
+                    "index_version",
                 ],
             )
             results = self._parse_hits(raw_hits[0] if raw_hits else [])
@@ -157,69 +168,30 @@ class MilvusVectorStore:
                 "uri": self.uri,
                 "returned": len(results),
             }
-
-        try:
-            await self._run_lite_safe(_run)
             return results
         except Exception as err:
             self.last_provider = f"{self.mode}_search_failed"
             self.last_debug = {"provider": self.last_provider, "error": str(err)}
-            logger.warning(f"Milvus 向量检索失败，检索将降级: {err}")
+            logger.warning("Milvus 向量检索失败: {}", err)
             return []
 
-    async def _run_lite_safe(self, operation: Callable[[], T]) -> T:
-        if self._uses_lite_short_session():
-            return await self._run_in_lite_session(operation)
-        return operation()
-
-    async def _run_in_lite_session(self, operation: Callable[[], T]) -> T:
-        import asyncio
-
-        def _wrapped() -> T:
-            with self._lite_session() as ready:
-                if not ready:
-                    raise RuntimeError(self.last_debug.get("error") or "Milvus Lite 连接失败")
-                return operation()
-
-        return await asyncio.to_thread(_wrapped)
-
-    @contextmanager
-    def _lite_session(self):
-        from agentchat.infrastructure.vector_store.milvus_lite_lock import milvus_lite_lock
-
-        db_path = Path(self._lite_uri(self._config()))
-        lock_path = db_path.with_suffix(f"{db_path.suffix}.process.lock")
-        timeout = float(self._config().get("lite_lock_timeout_seconds") or 60)
-
-        try:
-            with milvus_lite_lock(lock_path, timeout=timeout):
-                if not self._connect():
-                    yield False
-                    return
-                try:
-                    yield True
-                finally:
-                    self._disconnect()
-        except TimeoutError as err:
-            self.client = None
-            self.last_provider = "milvus_lite_lock_timeout"
-            self.last_debug = {
-                "provider": self.last_provider,
-                "error": str(err),
-                "hint": "Windows 上 Milvus Lite 不支持多进程同时持有 db 锁；"
-                "当前已通过文件锁串行访问，若仍超时请检查是否有僵尸进程占用 .rag_storage。",
-            }
-            logger.warning(str(err))
-            yield False
-
-    def _uses_lite_short_session(self) -> bool:
-        mode = str(self._config().get("mode") or "disabled").lower()
-        if mode not in {"lite", "milvus_lite"}:
-            return False
-        short_session = self._config().get("lite_short_session")
-        if short_session is not None:
-            return bool(short_session)
-        return True
+    def _ensure_collection_or_raise(self, vector_dim: int, *, document_id: str, chunk_count: int) -> None:
+        config = self._config()
+        mode = str(config.get("mode") or "disabled").lower()
+        if mode not in {"standalone", "milvus"}:
+            raise IndexingWriteError(
+                "milvus",
+                document_id,
+                chunk_count,
+                "Milvus 未配置为 standalone 模式，无法完成索引写入",
+            )
+        if not self._ensure_collection(vector_dim):
+            raise IndexingWriteError(
+                "milvus",
+                document_id,
+                chunk_count,
+                self.last_debug.get("error") or "Milvus collection 准备失败",
+            )
 
     def _ensure_collection(self, vector_dim: int) -> bool:
         if self.client is None and not self._connect():
@@ -239,6 +211,7 @@ class MilvusVectorStore:
             schema.add_field(field_name="permission_level", datatype=DataType.INT64)
             schema.add_field(field_name="page_no", datatype=DataType.INT64)
             schema.add_field(field_name="chunk_type", datatype=DataType.VARCHAR, max_length=64)
+            schema.add_field(field_name="index_version", datatype=DataType.INT64)
 
             index_params = self.client.prepare_index_params()
             index_params.add_index(
@@ -262,7 +235,7 @@ class MilvusVectorStore:
         except Exception as err:
             self.last_provider = f"{self.mode}_collection_failed"
             self.last_debug = {"provider": self.last_provider, "error": str(err)}
-            logger.warning(f"Milvus collection 准备失败，检索将降级: {err}")
+            logger.warning("Milvus collection 准备失败: {}", err)
             return False
 
     def _load_collection(self) -> bool:
@@ -286,7 +259,7 @@ class MilvusVectorStore:
         except Exception as err:
             self.last_provider = f"{self.mode}_collection_load_failed"
             self.last_debug = {"provider": self.last_provider, "error": str(err)}
-            logger.warning(f"Milvus collection 加载失败，检索将降级: {err}")
+            logger.warning("Milvus collection 加载失败: {}", err)
             return False
 
     def _connect(self) -> bool:
@@ -295,7 +268,7 @@ class MilvusVectorStore:
 
         config = self._config()
         mode = str(config.get("mode") or "disabled").lower()
-        if mode not in {"lite", "milvus_lite", "standalone", "milvus"}:
+        if mode not in {"standalone", "milvus"}:
             self.mode = "disabled"
             self.last_provider = "disabled"
             return False
@@ -303,51 +276,26 @@ class MilvusVectorStore:
         try:
             from pymilvus import MilvusClient
 
-            self.mode = "milvus_lite" if mode in {"lite", "milvus_lite"} else "milvus_standalone"
+            self.mode = "milvus_standalone"
             self.collection_name = str(config.get("collection_name") or self.DEFAULT_COLLECTION_NAME)
             self.metric_type = str(config.get("metric_type") or "COSINE").upper()
             token = str(config.get("token") or "")
-
-            if self.mode == "milvus_lite":
-                self.uri = self._lite_uri(config)
-                self.client = MilvusClient(uri=self.uri, token=token or None)
-            else:
-                host = str(config.get("host") or "127.0.0.1")
-                port = str(config.get("port") or "19530")
-                self.uri = str(config.get("uri") or f"http://{host}:{port}")
-                self.client = MilvusClient(uri=self.uri, token=token or None)
-
+            self.uri = str(config.get("uri") or f"http://{config.get('host') or '127.0.0.1'}:{config.get('port') or '19530'}")
+            self.client = MilvusClient(uri=self.uri, token=token or None)
             self.last_provider = self.mode
             self.last_debug = {
                 "provider": self.mode,
                 "collection": self.collection_name,
                 "uri": self.uri,
-                "short_session": self._uses_lite_short_session(),
             }
             logger.info("Milvus 已连接 mode={} uri={} collection={}", self.mode, self.uri, self.collection_name)
             return True
         except Exception as err:
             self.client = None
             self.last_provider = f"{mode}_connect_failed"
-            self.last_debug = {
-                "provider": self.last_provider,
-                "error": str(err),
-                "hint": "Milvus Lite 在 Windows 上若报锁冲突，请确认无多个进程长期占用同一 db 文件。",
-            }
-            logger.warning(f"Milvus 连接失败，检索将降级: {err}")
+            self.last_debug = {"provider": self.last_provider, "error": str(err)}
+            logger.warning("Milvus 连接失败: {}", err)
             return False
-
-    def _disconnect(self) -> None:
-        if self.client is None:
-            return
-        try:
-            close = getattr(self.client, "close", None)
-            if callable(close):
-                close()
-        except Exception as err:
-            logger.debug(f"Milvus 断开连接时出现非致命错误: {err}")
-        finally:
-            self.client = None
 
     @staticmethod
     def _config() -> dict:
@@ -356,12 +304,6 @@ class MilvusVectorStore:
             return {}
         config = getattr(rag, "vector_db", {}) or {}
         return config if isinstance(config, dict) else {}
-
-    def _lite_uri(self, config: dict) -> str:
-        raw_path = str(config.get("path") or config.get("uri") or self.DEFAULT_LITE_PATH)
-        path = resolve_storage_path(raw_path, default_relative=self.DEFAULT_LITE_PATH)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return str(path.resolve())
 
     @staticmethod
     def _filter_expression(filters: dict | None) -> str | None:
@@ -390,18 +332,18 @@ class MilvusVectorStore:
             results.append(
                 VectorSearchResult(
                     vector_id=vector_id,
-                    score=self._distance_to_score(distance),
+                    score=self._raw_metric_to_score(distance),
                     metadata=entity,
                 )
             )
         return results
 
-    def _distance_to_score(self, distance: float) -> float:
-        if self.metric_type == "COSINE":
-            return max(0.0, min(1.0, 1.0 - distance))
+    def _raw_metric_to_score(self, value: float) -> float:
+        if self.metric_type in {"COSINE", "IP"}:
+            return max(0.0, value)
         if self.metric_type == "L2":
-            return 1.0 / (1.0 + max(distance, 0.0))
-        return distance
+            return 1.0 / (1.0 + max(value, 0.0))
+        return value
 
     @staticmethod
     def _escape_filter_value(value: str) -> str:

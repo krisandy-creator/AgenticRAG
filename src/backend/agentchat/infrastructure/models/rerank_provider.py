@@ -1,14 +1,12 @@
 from typing import Any
 
 from agentchat.domains.indexing.entities import SearchHit
-from agentchat.domains.rag.evidence_selection import EvidenceSelector
 
 
 class RerankProvider:
     def __init__(self):
-        self.last_provider = "fallback_overlap"
+        self.last_provider = "fallback_rrf"
         self.last_debug: dict = {}
-        self._intent_selector = EvidenceSelector()
 
     async def rerank_hits(
         self,
@@ -62,8 +60,8 @@ class RerankProvider:
                 "error": str(err),
             }
 
-        self.last_provider = "fallback_intent_rank"
-        reranked = self._intent_selector._rank_by_intent(query, list(hits), structured_intent or {})
+        self.last_provider = "fallback_rrf"
+        reranked = sorted(hits, key=lambda item: item.score, reverse=True)
         self.last_debug = {
             "provider": self.last_provider,
             "input_count": len(hits),

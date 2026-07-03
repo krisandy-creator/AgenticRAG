@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 from uuid import uuid4
@@ -17,12 +18,29 @@ class DocumentChunkTable(SQLModelSerializable, table=True):
     page_no: Optional[int] = Field(default=None, index=True)
     chunk_type: str = Field(default="text", index=True)
     content: str = Field(sa_column=Column(Text))
+    content_hash: str = Field(default="", index=True)
     vector_id: str = Field(index=True)
     permission_level: int = Field(index=True)
+    index_version: int = Field(default=1, index=True)
+    status: str = Field(default="active", index=True)
     metadata_json: str = Field(default="{}", sa_column=Column(Text))
     created_at: Optional[datetime] = Field(
         sa_column=Column(DateTime, nullable=False, index=True, server_default=text("CURRENT_TIMESTAMP"))
     )
+
+
+@dataclass
+class RetrievalCandidate:
+    chunk_id: str
+    document_id: str = ""
+    vector_id: str = ""
+    sparse_score: float = 0.0
+    sparse_rank: int = 0
+    dense_score: float = 0.0
+    dense_rank: int = 0
+    rrf_score: float = 0.0
+    fusion_rank: int | None = None
+    content: str = ""
 
 
 class SearchHit(BaseModel):

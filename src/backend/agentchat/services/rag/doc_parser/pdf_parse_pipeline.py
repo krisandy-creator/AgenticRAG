@@ -13,6 +13,7 @@ from agentchat.domains.documents.repositories import DocumentRepository
 from agentchat.domains.indexing.chunking import ChunkingService, TextChunk
 from agentchat.domains.indexing.services import IndexingService
 from agentchat.infrastructure.concurrency.redis_limiter import LocalConcurrencyLimiter, RedisConcurrencyLimiter
+from agentchat.infrastructure.search_store.elasticsearch_store import ElasticsearchChunkStore
 from agentchat.infrastructure.vector_store.milvus_store import MilvusVectorStore
 from agentchat.services.rag.doc_parser.multimodal_pdf import MultimodalPDFParser, RenderedPDFPage
 from agentchat.services.rag.doc_parser.pdf_config import PDFParseConfig, load_pdf_parse_config
@@ -31,6 +32,7 @@ class PDFParsePipeline:
         self.parser = parser or MultimodalPDFParser()
         self.indexing = IndexingService()
         self.vector_store = MilvusVectorStore()
+        self.sparse_store = ElasticsearchChunkStore()
         self.limiter = RedisConcurrencyLimiter()
 
     async def run(self, document, job, data: bytes) -> None:
@@ -51,6 +53,7 @@ class PDFParsePipeline:
         if next_page == 1:
             DocumentRepository.clear_parse_artifacts(document.document_id)
             await self.vector_store.delete_by_document(document.document_id)
+            await self.sparse_store.delete_by_document(document.document_id)
             DocumentRepository.update_job_progress(
                 job.job_id,
                 total_pages=total_pages,

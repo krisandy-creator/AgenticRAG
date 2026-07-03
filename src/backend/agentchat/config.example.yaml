@@ -82,7 +82,7 @@ tools:
 # RAG (检索增强生成) 配置
 rag:
   enable_summary: False # 是否对知识库片段进行摘要
-  enable_elasticsearch: False # 是否启用 Elasticsearch 进行关键词搜索
+  enable_elasticsearch: True # 是否启用 Elasticsearch 进行关键词搜索；使用 docker-compose.yml 中 ES 时可改为 True
 
   retrival:
     top_k: 5  # 知识库召回的最大数量
@@ -116,18 +116,17 @@ rag:
 
   # ES数据库配置，主要做关键词召回
   elasticsearch:
-    hosts: "http://127.0.0.1:9200" # Elasticsearch 连接地址。如果 'enable_elasticsearch' 为 False，则不需要填写。
+    hosts: "http://127.0.0.1:9200" # Docker 版 ES 默认暴露此地址
+    index_name: "rag_chunks"
 
   # 向量数据库配置 (Vector DB)
   vector_db:
     host: "127.0.0.1"
     port: "19530"
-    mode: "lite" # 向量库模式: standalone (Milvus), lite (轻量Milvus), chroma (ChromaDB)
-    path: ".rag_storage/milvus_lite.db" # Milvus Lite 本地库路径
+    mode: "standalone" # 向量库模式: standalone (Docker Milvus)
+    uri: "http://127.0.0.1:19530"
     collection_name: "global_knowledge_chunks"
     metric_type: "COSINE"
-    lite_short_session: true # Lite 模式每次操作后释放连接，配合文件锁支持 API+Worker 多进程
-    lite_lock_timeout_seconds: 60 # 等待 Milvus Lite 文件锁的超时时间（秒）
 
 # 阿对象存储 OSS 配置
 storage:
@@ -143,9 +142,9 @@ storage:
   minio:
     access_key_id: ""
     access_key_secret: ""
-    endpoint: "127.0.0.1:9000"
+    endpoint: "127.0.0.1:19000"
     bucket_name: "agentchat" # minio 存储桶名称
-    base_url: "http://127.0.0.1:9000/agentchat" # 访问基础 URL
+    base_url: "http://127.0.0.1:19000/agentchat" # 访问基础 URL
 
 # 默认配置 (如图标 URL, 资源链接)
 default_config:
